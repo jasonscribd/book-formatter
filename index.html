@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BigQuery Book Formatter</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f5f5f5;
+      color: #222;
+      padding: 2rem;
+    }
+    h1 { font-size: 1.25rem; margin-bottom: 0.25rem; }
+    p.subtitle { color: #666; font-size: 0.875rem; margin-bottom: 1.5rem; }
+    .card {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+    }
+    label { display: block; font-size: 0.8rem; font-weight: 600; text-transform: uppercase;
+            letter-spacing: 0.05em; color: #555; margin-bottom: 0.5rem; }
+    textarea {
+      width: 100%;
+      height: 160px;
+      font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+      font-size: 0.85rem;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      padding: 0.6rem 0.75rem;
+      resize: vertical;
+      background: #fafafa;
+      color: #222;
+    }
+    textarea:focus { outline: none; border-color: #888; background: #fff; }
+    button {
+      cursor: pointer;
+      border: none;
+      border-radius: 4px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      padding: 0.55rem 1.1rem;
+    }
+    #formatBtn {
+      background: #1a73e8;
+      color: #fff;
+      margin-top: 0.75rem;
+    }
+    #formatBtn:hover { background: #1558b0; }
+    .output-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.5rem;
+    }
+    #copyBtn {
+      background: #eee;
+      color: #333;
+      font-size: 0.8rem;
+      padding: 0.35rem 0.75rem;
+    }
+    #copyBtn:hover { background: #ddd; }
+    #copyBtn.copied { background: #d4edda; color: #155724; }
+    #output {
+      width: 100%;
+      height: 420px;
+      font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+      font-size: 0.85rem;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      padding: 0.6rem 0.75rem;
+      background: #fafafa;
+      color: #222;
+      resize: vertical;
+    }
+    .error { color: #c0392b; font-size: 0.85rem; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>BigQuery Book Formatter</h1>
+  <p class="subtitle">Paste spreadsheet data (title &rarr; author, tab-separated) and get the full Fable query ready to paste into Metabase.</p>
+
+  <div class="card">
+    <label for="input">Paste spreadsheet data</label>
+    <textarea id="input" placeholder="The Martian&#9;Andy Weir&#10;Dune&#9;Frank Herbert&#10;Project Hail Mary&#9;Andy Weir"></textarea>
+    <div id="error" class="error"></div>
+    <button id="formatBtn">Format SQL</button>
+  </div>
+
+  <div class="card">
+    <div class="output-header">
+      <label style="margin:0">BigQuery SQL</label>
+      <button id="copyBtn">Copy</button>
+    </div>
+    <textarea id="output" readonly></textarea>
+  </div>
+
+  <!-- SQL template stored as raw text — no JS escaping needed -->
+  <script id="sql-template" type="text/plain">books AS (
+  SELECT
+    b.id,
+    b.title,
+    b.isbn,
+    b.published_date,
+    b.description,
+    REGEXP_REPLACE(
+      REPLACE(REPLACE(TO_JSON_STRING(b.authors), '["', ''), '"]', ''),
+      '","', ', '
+    ) AS author_display,
+    TRIM(SPLIT(
+      REGEXP_REPLACE(
+        REPLACE(REPLACE(TO_JSON_STRING(b.authors), '["', ''), '"]', ''),
+        '","', ', '
+      ), ','
+    )[SAFE_OFFSET(0)]) AS first_author
+  FROM `fable-backend.fable_prod_public.api_book` b
+  JOIN input_books i ON LOWER(b.title) = LOWER(i.title)
+  WHERE b.type = 'book'
+),
+ble AS (
+  SELECT *
+  FROM `fable-backend.fable_prod_public.api_booklistentry`
+  WHERE updated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+    AND source NOT IN ('good_reads', 'kindle')
+),
+top_reviews AS (
+  SELECT
+    book_id,
+    review,
+    rating,
+    ROW_NUMBER() OVER (PARTITION BY book_id ORDER BY likes_count DESC) AS rn
+  FROM `fable-backend.fable_prod_public.api_userbookreview`
+  WHERE rating >= 4.5
+    AND review IS NOT NULL
+    AND review != ''
+    AND deleted = FALSE
+    AND hidden = FALSE
+    AND public = TRUE
+    AND contains_spoilers = FALSE
+)
+SELECT
+  b.title AS Title,
+  b.author_display AS Author,
+  b.isbn AS ISBN,
+  CONCAT(
+    'https://fable.co/book/',
+    REGEXP_REPLACE(LOWER(b.title), r'[^a-z0-9]+', '-'),
+    '-by-',
+    REGEXP_REPLACE(LOWER(b.first_author), r'[^a-z0-9]+', '-'),
+    '-',
+    b.isbn
+  ) AS URL,
+  b.description AS Description,
+  r.review AS TopReview,
+  r.rating AS ReviewRating,
+  COUNT(*) AS Frequency
+FROM ble
+JOIN books b ON ble.book_id = b.id
+LEFT JOIN top_reviews r ON r.book_id = b.id AND r.rn = 1
+WHERE
+  b.isbn IS NOT NULL
+  AND b.published_date IS NOT NULL
+  AND b.published_date <= CURRENT_DATE()
+GROUP BY
+  b.title, b.author_display, b.isbn, b.first_author, b.description,
+  r.review, r.rating
+ORDER BY Frequency DESC;</script>
+
+  <script>
+    const TEMPLATE_SUFFIX = document.getElementById('sql-template').textContent.trim();
+
+    function escapeSql(str) {
+      return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    }
+
+    document.getElementById('formatBtn').addEventListener('click', () => {
+      const raw = document.getElementById('input').value;
+      const errorEl = document.getElementById('error');
+      errorEl.textContent = '';
+
+      const lines = raw.split('\n');
+      const structs = [];
+      const badLines = [];
+
+      lines.forEach((line, i) => {
+        const trimmed = line.trim();
+        if (!trimmed) return; // skip blank
+        const parts = trimmed.split('\t');
+        if (parts.length < 2) {
+          badLines.push(i + 1);
+          return;
+        }
+        const title = parts[0].trim();
+        const author = parts.slice(1).join(' ').trim();
+        structs.push("    STRUCT('" + escapeSql(title) + "' AS title, '" + escapeSql(author) + "' AS author)");
+      });
+
+      if (badLines.length) {
+        errorEl.textContent = 'Warning: line(s) ' + badLines.join(', ') + ' skipped (no tab found — ensure data is tab-separated).';
+      }
+
+      if (structs.length === 0) {
+        document.getElementById('output').value = '';
+        if (!badLines.length) errorEl.textContent = 'No data found. Paste tab-separated rows above.';
+        return;
+      }
+
+      const inputBooksCte =
+        'WITH input_books AS (\n' +
+        '  SELECT title, author FROM UNNEST([\n' +
+        structs.join(',\n') + '\n' +
+        '  ])\n' +
+        '),\n';
+
+      document.getElementById('output').value = inputBooksCte + TEMPLATE_SUFFIX;
+    });
+
+    document.getElementById('copyBtn').addEventListener('click', () => {
+      const output = document.getElementById('output').value;
+      if (!output) return;
+      navigator.clipboard.writeText(output).then(() => {
+        const btn = document.getElementById('copyBtn');
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+      });
+    });
+  </script>
+</body>
+</html>
