@@ -21,8 +21,34 @@
       padding: 1.25rem;
       margin-bottom: 1rem;
     }
-    label { display: block; font-size: 0.8rem; font-weight: 600; text-transform: uppercase;
-            letter-spacing: 0.05em; color: #555; margin-bottom: 0.5rem; }
+    label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #555;
+      margin-bottom: 0.5rem;
+    }
+    .input-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.5rem;
+    }
+    .input-header label { margin-bottom: 0; }
+    .file-upload-btn {
+      cursor: pointer;
+      background: #eee;
+      color: #333;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      padding: 0.3rem 0.7rem;
+      white-space: nowrap;
+    }
+    .file-upload-btn:hover { background: #ddd; }
     textarea {
       width: 100%;
       height: 160px;
@@ -50,6 +76,54 @@
       margin-top: 0.75rem;
     }
     #formatBtn:hover { background: #1558b0; }
+
+    /* Column picker */
+    #colPicker {
+      display: none;
+      margin-top: 0.85rem;
+      padding: 0.85rem 1rem;
+      background: #fffbea;
+      border: 1px solid #f0d060;
+      border-radius: 6px;
+    }
+    #colPicker p {
+      font-size: 0.85rem;
+      color: #555;
+      margin-bottom: 0.65rem;
+    }
+    .col-picker-row {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    .col-picker-row .col-field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      flex: 1;
+      min-width: 140px;
+    }
+    .col-picker-row label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #666;
+      margin-bottom: 0;
+    }
+    .col-picker-row select {
+      font-size: 0.85rem;
+      padding: 0.35rem 0.5rem;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      background: #fff;
+    }
+    #colPickerNote {
+      font-size: 0.78rem;
+      color: #888;
+      margin-top: 0.5rem;
+    }
+
+    /* Output */
     .output-header {
       display: flex;
       align-items: center;
@@ -77,16 +151,40 @@
       resize: vertical;
     }
     .error { color: #c0392b; font-size: 0.85rem; margin-top: 0.5rem; }
+    .info  { color: #1a73e8; font-size: 0.82rem; margin-top: 0.4rem; }
   </style>
 </head>
 <body>
   <h1>BigQuery Book Formatter</h1>
-  <p class="subtitle">Paste spreadsheet data (title &rarr; author, tab-separated) and get the full Fable query ready to paste into Metabase.</p>
+  <p class="subtitle">Paste spreadsheet data or upload a CSV/TSV file — title &amp; author columns are detected automatically.</p>
 
   <div class="card">
-    <label for="input">Paste spreadsheet data</label>
-    <textarea id="input" placeholder="The Martian&#9;Andy Weir&#10;Dune&#9;Frank Herbert&#10;Project Hail Mary&#9;Andy Weir"></textarea>
+    <div class="input-header">
+      <label for="input">Paste data or upload a CSV / TSV file</label>
+      <label class="file-upload-btn" for="fileInput">&#128194; Upload file</label>
+    </div>
+    <input type="file" id="fileInput" accept=".csv,.tsv,.txt" style="display:none">
+    <textarea id="input"
+      placeholder="Accepts CSV/TSV with headers (title &amp; author columns auto-detected), or plain rows:&#10;The Martian&#9;Andy Weir&#10;Dune&#9;Frank Herbert"></textarea>
+
+    <!-- Column picker — shown when columns are ambiguous -->
+    <div id="colPicker">
+      <p>Multiple columns detected. Select which ones contain title and author:</p>
+      <div class="col-picker-row">
+        <div class="col-field">
+          <label for="titleColSelect">Title column</label>
+          <select id="titleColSelect"></select>
+        </div>
+        <div class="col-field">
+          <label for="authorColSelect">Author column</label>
+          <select id="authorColSelect"></select>
+        </div>
+      </div>
+      <p id="colPickerNote"></p>
+    </div>
+
     <div id="error" class="error"></div>
+    <div id="info" class="info"></div>
     <button id="formatBtn">Format SQL</button>
   </div>
 
@@ -172,51 +270,216 @@ ORDER BY Frequency DESC;</script>
   <script>
     const TEMPLATE_SUFFIX = document.getElementById('sql-template').textContent.trim();
 
+    // ── Parsing helpers ──────────────────────────────────────────────────────
+
+    function detectDelimiter(line) {
+      const tabs   = (line.match(/\t/g)  || []).length;
+      const commas = (line.match(/,/g)   || []).length;
+      return tabs >= commas ? '\t' : ',';
+    }
+
+    /** RFC-4180-ish CSV line parser */
+    function parseCSVLine(line, delimiter) {
+      const result = [];
+      let inQuote = false, current = '';
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+          if (inQuote && line[i + 1] === '"') { current += '"'; i++; }
+          else inQuote = !inQuote;
+        } else if (ch === delimiter && !inQuote) {
+          result.push(current.trim());
+          current = '';
+        } else {
+          current += ch;
+        }
+      }
+      result.push(current.trim());
+      return result;
+    }
+
+    /** Return the index of the first header that contains any of the keywords */
+    function findCol(headers, keywords) {
+      // Exact match first
+      let idx = headers.findIndex(h =>
+        keywords.some(k => h.toLowerCase() === k));
+      if (idx !== -1) return idx;
+      // Partial match
+      idx = headers.findIndex(h =>
+        keywords.some(k => h.toLowerCase().includes(k)));
+      return idx;
+    }
+
+    /** True if the first row looks like a header (non-numeric values) */
+    function looksLikeHeader(cells) {
+      return cells.some(c => c.trim() !== '' && /[a-z_]/i.test(c) && !/^\d+(\.\d+)?$/.test(c.trim()));
+    }
+
+    // ── SQL builder ──────────────────────────────────────────────────────────
+
     function escapeSql(str) {
       return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     }
 
-    document.getElementById('formatBtn').addEventListener('click', () => {
-      const raw = document.getElementById('input').value;
-      const errorEl = document.getElementById('error');
-      errorEl.textContent = '';
-
-      const lines = raw.split('\n');
-      const structs = [];
-      const badLines = [];
-
-      lines.forEach((line, i) => {
-        const trimmed = line.trim();
-        if (!trimmed) return; // skip blank
-        const parts = trimmed.split('\t');
-        if (parts.length < 2) {
-          badLines.push(i + 1);
-          return;
-        }
-        const title = parts[0].trim();
-        const author = parts.slice(1).join(' ').trim();
-        structs.push("    STRUCT('" + escapeSql(title) + "' AS title, '" + escapeSql(author) + "' AS author)");
-      });
-
-      if (badLines.length) {
-        errorEl.textContent = 'Warning: line(s) ' + badLines.join(', ') + ' skipped (no tab found — ensure data is tab-separated).';
-      }
-
-      if (structs.length === 0) {
-        document.getElementById('output').value = '';
-        if (!badLines.length) errorEl.textContent = 'No data found. Paste tab-separated rows above.';
-        return;
-      }
-
+    function buildSQL(pairs) {
+      const structs = pairs.map(([title, author]) =>
+        "    STRUCT('" + escapeSql(title) + "' AS title, '" + escapeSql(author) + "' AS author)");
       const inputBooksCte =
         'WITH input_books AS (\n' +
         '  SELECT title, author FROM UNNEST([\n' +
         structs.join(',\n') + '\n' +
         '  ])\n' +
         '),\n';
+      return inputBooksCte + TEMPLATE_SUFFIX;
+    }
 
-      document.getElementById('output').value = inputBooksCte + TEMPLATE_SUFFIX;
+    // ── State ────────────────────────────────────────────────────────────────
+
+    let parsedRows = [];     // all data rows as string arrays
+    let parsedHeaders = [];  // header row (may be empty for plain mode)
+
+    // ── File upload ──────────────────────────────────────────────────────────
+
+    document.getElementById('fileInput').addEventListener('change', function () {
+      const file = this.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = e => {
+        document.getElementById('input').value = e.target.result;
+        resetColPicker();
+      };
+      reader.readAsText(file);
+      this.value = ''; // allow re-uploading the same file
     });
+
+    // ── Column picker helpers ────────────────────────────────────────────────
+
+    function resetColPicker() {
+      document.getElementById('colPicker').style.display = 'none';
+      document.getElementById('colPickerNote').textContent = '';
+      parsedRows = [];
+      parsedHeaders = [];
+    }
+
+    function showColPicker(headers, rows, delimiter, autoTitle, autoAuthor) {
+      parsedHeaders = headers;
+      parsedRows = rows;
+
+      const titleSel  = document.getElementById('titleColSelect');
+      const authorSel = document.getElementById('authorColSelect');
+      [titleSel, authorSel].forEach(sel => {
+        sel.innerHTML = '';
+        headers.forEach((h, i) => {
+          const opt = document.createElement('option');
+          opt.value = i;
+          opt.textContent = h || '(column ' + (i + 1) + ')';
+          sel.appendChild(opt);
+        });
+      });
+
+      // Pre-select best guesses if we have them
+      if (autoTitle  !== -1) titleSel.value  = autoTitle;
+      if (autoAuthor !== -1) authorSel.value = autoAuthor;
+
+      const sampleCount = Math.min(rows.length, 3);
+      document.getElementById('colPickerNote').textContent =
+        sampleCount + ' data row' + (sampleCount !== 1 ? 's' : '') + ' detected. ' +
+        'Adjust the selections above, then click Format SQL.';
+
+      document.getElementById('colPicker').style.display = 'block';
+    }
+
+    // ── Format button ────────────────────────────────────────────────────────
+
+    document.getElementById('formatBtn').addEventListener('click', () => {
+      const raw     = document.getElementById('input').value;
+      const errorEl = document.getElementById('error');
+      const infoEl  = document.getElementById('info');
+      errorEl.textContent = '';
+      infoEl.textContent  = '';
+
+      if (!raw.trim()) {
+        errorEl.textContent = 'No data found. Paste or upload data above.';
+        return;
+      }
+
+      const lines = raw.trim().split(/\r?\n/).filter(l => l.trim() !== '');
+      const delimiter = detectDelimiter(lines[0]);
+      const firstCells = parseCSVLine(lines[0], delimiter);
+
+      // ── Mode A: picker is already visible → use selected columns ──────────
+      if (document.getElementById('colPicker').style.display !== 'none' && parsedRows.length > 0) {
+        const tIdx = parseInt(document.getElementById('titleColSelect').value,  10);
+        const aIdx = parseInt(document.getElementById('authorColSelect').value, 10);
+        return formatFromParsed(parsedRows, tIdx, aIdx, infoEl, errorEl);
+      }
+
+      // ── Mode B: CSV / TSV with a header row ───────────────────────────────
+      if (lines.length >= 2 && looksLikeHeader(firstCells)) {
+        const headers = firstCells.map(h => h.toLowerCase());
+        const rows    = lines.slice(1).map(l => parseCSVLine(l, delimiter));
+
+        const tIdx = findCol(headers, ['title', 'book_title', 'book title', 'name', 'search_title']);
+        const aIdx = findCol(headers, ['author', 'author_name', 'writer', 'by', 'search_author']);
+
+        if (tIdx !== -1 && aIdx !== -1) {
+          // Found both — go straight to SQL
+          infoEl.textContent = 'Auto-detected columns: "' + firstCells[tIdx] + '" (title) and "' + firstCells[aIdx] + '" (author).';
+          document.getElementById('colPicker').style.display = 'none';
+          return formatFromParsed(rows, tIdx, aIdx, infoEl, errorEl);
+        } else {
+          // Show column picker
+          showColPicker(firstCells, rows, delimiter, tIdx, aIdx);
+          errorEl.textContent = 'Could not automatically identify title/author columns — please select them above.';
+          return;
+        }
+      }
+
+      // ── Mode C: plain title\tauthor (original behaviour) ──────────────────
+      const structs  = [];
+      const badLines = [];
+      lines.forEach((line, i) => {
+        const parts = line.split('\t');
+        if (parts.length < 2) { badLines.push(i + 1); return; }
+        structs.push([parts[0].trim(), parts.slice(1).join(' ').trim()]);
+      });
+      if (badLines.length) {
+        errorEl.textContent = 'Warning: line(s) ' + badLines.join(', ') +
+          ' skipped (no tab found — ensure data is tab-separated).';
+      }
+      if (structs.length === 0) {
+        if (!badLines.length) errorEl.textContent = 'No data found. Paste tab-separated rows above.';
+        document.getElementById('output').value = '';
+        return;
+      }
+      document.getElementById('output').value = buildSQL(structs);
+    });
+
+    function formatFromParsed(rows, tIdx, aIdx, infoEl, errorEl) {
+      const pairs    = [];
+      const badLines = [];
+      rows.forEach((cells, i) => {
+        const title  = (cells[tIdx]  || '').trim();
+        const author = (cells[aIdx] || '').trim();
+        if (!title && !author) return; // skip blank rows
+        if (!title || !author) { badLines.push(i + 2); return; } // +2: 1-based + header
+        pairs.push([title, author]);
+      });
+      if (badLines.length) {
+        errorEl.textContent = (errorEl.textContent ? errorEl.textContent + '  ' : '') +
+          'Warning: row(s) ' + badLines.join(', ') + ' skipped (missing title or author).';
+      }
+      if (pairs.length === 0) {
+        document.getElementById('output').value = '';
+        if (!errorEl.textContent) errorEl.textContent = 'No valid title/author pairs found.';
+        return;
+      }
+      infoEl.textContent = (infoEl.textContent ? infoEl.textContent + '  ' : '') +
+        pairs.length + ' book' + (pairs.length !== 1 ? 's' : '') + ' included.';
+      document.getElementById('output').value = buildSQL(pairs);
+    }
+
+    // ── Copy button ──────────────────────────────────────────────────────────
 
     document.getElementById('copyBtn').addEventListener('click', () => {
       const output = document.getElementById('output').value;
@@ -228,6 +491,9 @@ ORDER BY Frequency DESC;</script>
         setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
       });
     });
+
+    // Reset picker when textarea is edited manually
+    document.getElementById('input').addEventListener('input', resetColPicker);
   </script>
 </body>
 </html>
