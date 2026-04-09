@@ -199,6 +199,8 @@
   <!-- SQL template stored as raw text — no JS escaping needed -->
   <script id="sql-template" type="text/plain">books AS (
   SELECT
+    i.row_num,
+    i.author AS search_author,
     b.id,
     b.title,
     b.isbn,
@@ -213,9 +215,15 @@
         REPLACE(REPLACE(TO_JSON_STRING(b.authors), '["', ''), '"]', ''),
         '","', ', '
       ), ','
-    )[SAFE_OFFSET(0)]) AS first_author
+    )[SAFE_OFFSET(0)]) AS first_author,
+    ROW_NUMBER() OVER (PARTITION BY i.row_num ORDER BY b.id) AS rn
   FROM `fable-backend.fable_prod_public.api_book` b
-  JOIN input_books i ON LOWER(b.title) = LOWER(i.title)
+  JOIN input_books i
+    ON LOWER(b.title) = LOWER(i.title)
+    AND (
+      i.author = ''
+      OR LOWER(TO_JSON_STRING(b.authors)) LIKE CONCAT('%', LOWER(i.author), '%')
+    )
   WHERE b.type = 'book'
 ),
 ble AS (
@@ -238,34 +246,47 @@ top_reviews AS (
     AND hidden = FALSE
     AND public = TRUE
     AND contains_spoilers = FALSE
+),
+results AS (
+  SELECT
+    b.row_num,
+    b.title AS Title,
+    b.author_display AS Author,
+    b.isbn AS ISBN,
+    CONCAT(
+      'https://fable.co/book/',
+      REGEXP_REPLACE(LOWER(b.title), r'[^a-z0-9]+', '-'),
+      '-by-',
+      REGEXP_REPLACE(LOWER(b.first_author), r'[^a-z0-9]+', '-'),
+      '-',
+      b.isbn
+    ) AS URL,
+    b.description AS Description,
+    r.review AS TopReview,
+    r.rating AS ReviewRating,
+    COUNT(*) AS Frequency
+  FROM ble
+  JOIN books b ON ble.book_id = b.id AND b.rn = 1
+  LEFT JOIN top_reviews r ON r.book_id = b.id AND r.rn = 1
+  WHERE
+    b.isbn IS NOT NULL
+    AND b.published_date IS NOT NULL
+    AND b.published_date <= CURRENT_DATE()
+  GROUP BY
+    b.row_num, b.title, b.author_display, b.isbn, b.first_author, b.description,
+    r.review, r.rating
 )
 SELECT
-  b.title AS Title,
-  b.author_display AS Author,
-  b.isbn AS ISBN,
-  CONCAT(
-    'https://fable.co/book/',
-    REGEXP_REPLACE(LOWER(b.title), r'[^a-z0-9]+', '-'),
-    '-by-',
-    REGEXP_REPLACE(LOWER(b.first_author), r'[^a-z0-9]+', '-'),
-    '-',
-    b.isbn
-  ) AS URL,
-  b.description AS Description,
-  r.review AS TopReview,
-  r.rating AS ReviewRating,
-  COUNT(*) AS Frequency
-FROM ble
-JOIN books b ON ble.book_id = b.id
-LEFT JOIN top_reviews r ON r.book_id = b.id AND r.rn = 1
-WHERE
-  b.isbn IS NOT NULL
-  AND b.published_date IS NOT NULL
-  AND b.published_date <= CURRENT_DATE()
-GROUP BY
-  b.title, b.author_display, b.isbn, b.first_author, b.description,
-  r.review, r.rating
-ORDER BY Frequency DESC;</script>
+  Title,
+  Author,
+  ISBN,
+  URL,
+  Description,
+  TopReview,
+  ReviewRating,
+  Frequency
+FROM results
+ORDER BY row_num;</script>
 
   <script>
     const TEMPLATE_SUFFIX = document.getElementById('sql-template').textContent.trim();
@@ -322,11 +343,16 @@ ORDER BY Frequency DESC;</script>
     }
 
     function buildSQL(pairs) {
-      const structs = pairs.map(([title, author]) =>
-        "    STRUCT('" + escapeSql(title) + "' AS title, '" + escapeSql(author) + "' AS author)");
+      const structs = pairs.map(([title, author], idx) => {
+        const n = idx + 1;
+        if (idx === 0) {
+          return "    STRUCT(" + n + " AS row_num, '" + escapeSql(title) + "' AS title, '" + escapeSql(author) + "' AS author)";
+        }
+        return "    STRUCT(" + n + ", '" + escapeSql(title) + "', '" + escapeSql(author) + "')";
+      });
       const inputBooksCte =
         'WITH input_books AS (\n' +
-        '  SELECT title, author FROM UNNEST([\n' +
+        '  SELECT row_num, title, author FROM UNNEST([\n' +
         structs.join(',\n') + '\n' +
         '  ])\n' +
         '),\n';
