@@ -200,7 +200,9 @@
   <script id="sql-template" type="text/plain">books AS (
   SELECT
     i.row_num,
+    i.title AS search_title,
     i.author AS search_author,
+    i.everand_link,
     b.id,
     b.title,
     b.isbn,
@@ -217,14 +219,14 @@
       ), ','
     )[SAFE_OFFSET(0)]) AS first_author,
     ROW_NUMBER() OVER (PARTITION BY i.row_num ORDER BY b.id) AS rn
-  FROM `fable-backend.fable_prod_public.api_book` b
-  JOIN input_books i
+  FROM input_books i
+  LEFT JOIN `fable-backend.fable_prod_public.api_book` b
     ON LOWER(b.title) = LOWER(i.title)
     AND (
       i.author = ''
       OR LOWER(TO_JSON_STRING(b.authors)) LIKE CONCAT('%', LOWER(i.author), '%')
     )
-  WHERE b.type = 'book'
+    AND b.type = 'book'
 ),
 ble AS (
   SELECT *
@@ -234,54 +236,60 @@ ble AS (
 ),
 top_reviews AS (
   SELECT
-    book_id,
-    review,
-    rating,
-    ROW_NUMBER() OVER (PARTITION BY book_id ORDER BY likes_count DESC) AS rn
-  FROM `fable-backend.fable_prod_public.api_userbookreview`
-  WHERE rating >= 4.5
-    AND review IS NOT NULL
-    AND review != ''
-    AND deleted = FALSE
-    AND hidden = FALSE
-    AND public = TRUE
-    AND contains_spoilers = FALSE
+    ubr.book_id,
+    u.display_name,
+    ubr.review,
+    ubr.rating,
+    ROW_NUMBER() OVER (PARTITION BY ubr.book_id ORDER BY ubr.likes_count DESC) AS rn
+  FROM `fable-backend.fable_prod_public.api_userbookreview` ubr
+  LEFT JOIN `fable-backend.fable_prod_public.api_fableuser` u ON ubr.user_id = u.id
+  WHERE ubr.rating >= 4.5
+    AND ubr.review IS NOT NULL
+    AND ubr.review != ''
+    AND ubr.deleted = FALSE
+    AND ubr.hidden = FALSE
+    AND ubr.public = TRUE
+    AND ubr.contains_spoilers = FALSE
 ),
 results AS (
   SELECT
     b.row_num,
-    b.title AS Title,
-    b.author_display AS Author,
+    b.everand_link,
+    COALESCE(b.title, b.search_title) AS Title,
+    COALESCE(b.author_display, b.search_author) AS Author,
     b.isbn AS ISBN,
-    CONCAT(
-      'https://fable.co/book/',
-      REGEXP_REPLACE(LOWER(b.title), r'[^a-z0-9]+', '-'),
-      '-by-',
-      REGEXP_REPLACE(LOWER(b.first_author), r'[^a-z0-9]+', '-'),
-      '-',
-      b.isbn
-    ) AS URL,
+    CASE WHEN b.id IS NOT NULL AND b.isbn IS NOT NULL THEN
+      CONCAT(
+        'https://fable.co/book/',
+        REGEXP_REPLACE(LOWER(b.title), r'[^a-z0-9]+', '-'),
+        '-by-',
+        REGEXP_REPLACE(LOWER(b.first_author), r'[^a-z0-9]+', '-'),
+        '-',
+        b.isbn
+      )
+    END AS URL,
     b.description AS Description,
+    r.display_name AS ReviewerName,
     r.review AS TopReview,
     r.rating AS ReviewRating,
-    COUNT(*) AS Frequency
-  FROM ble
-  JOIN books b ON ble.book_id = b.id AND b.rn = 1
+    COUNT(ble.book_id) AS Frequency
+  FROM books b
+  LEFT JOIN ble ON ble.book_id = b.id
   LEFT JOIN top_reviews r ON r.book_id = b.id AND r.rn = 1
-  WHERE
-    b.isbn IS NOT NULL
-    AND b.published_date IS NOT NULL
-    AND b.published_date <= CURRENT_DATE()
+  WHERE b.rn = 1
   GROUP BY
-    b.row_num, b.title, b.author_display, b.isbn, b.first_author, b.description,
-    r.review, r.rating
+    b.row_num, b.everand_link, b.id, b.search_title, b.search_author, b.title, b.author_display,
+    b.isbn, b.first_author, b.description, r.display_name, r.review, r.rating
 )
 SELECT
+  row_num,
+  everand_link,
   Title,
   Author,
   ISBN,
   URL,
   Description,
+  ReviewerName,
   TopReview,
   ReviewRating,
   Frequency
@@ -343,16 +351,18 @@ ORDER BY row_num;</script>
     }
 
     function buildSQL(pairs) {
-      const structs = pairs.map(([title, author], idx) => {
-        const n = idx + 1;
+      const hasEverand = pairs.some(p => p[3] !== undefined);
+      const structs = pairs.map(([title, author, rowNum, everandLink], idx) => {
+        const n = (rowNum !== undefined && rowNum !== null) ? rowNum : idx + 1;
+        const el = "'" + escapeSql(hasEverand ? (everandLink || '') : '') + "'";
         if (idx === 0) {
-          return "    STRUCT(" + n + " AS row_num, '" + escapeSql(title) + "' AS title, '" + escapeSql(author) + "' AS author)";
+          return "    STRUCT(" + n + " AS row_num, '" + escapeSql(title) + "' AS title, '" + escapeSql(author) + "' AS author, " + el + " AS everand_link)";
         }
-        return "    STRUCT(" + n + ", '" + escapeSql(title) + "', '" + escapeSql(author) + "')";
+        return "    STRUCT(" + n + ", '" + escapeSql(title) + "', '" + escapeSql(author) + "', " + el + ")";
       });
       const inputBooksCte =
         'WITH input_books AS (\n' +
-        '  SELECT row_num, title, author FROM UNNEST([\n' +
+        '  SELECT row_num, title, author, everand_link FROM UNNEST([\n' +
         structs.join(',\n') + '\n' +
         '  ])\n' +
         '),\n';
@@ -435,9 +445,12 @@ ORDER BY row_num;</script>
 
       // ── Mode A: picker is already visible → use selected columns ──────────
       if (document.getElementById('colPicker').style.display !== 'none' && parsedRows.length > 0) {
-        const tIdx = parseInt(document.getElementById('titleColSelect').value,  10);
-        const aIdx = parseInt(document.getElementById('authorColSelect').value, 10);
-        return formatFromParsed(parsedRows, tIdx, aIdx, infoEl, errorEl);
+        const tIdx  = parseInt(document.getElementById('titleColSelect').value,  10);
+        const aIdx  = parseInt(document.getElementById('authorColSelect').value, 10);
+        const lh    = parsedHeaders.map(h => h.toLowerCase());
+        const rnIdx = findCol(lh, ['row_num', 'row_number', 'rownum']);
+        const elIdx = findCol(lh, ['everand_link', 'everand link', 'everandlink']);
+        return formatFromParsed(parsedRows, tIdx, aIdx, infoEl, errorEl, rnIdx, elIdx);
       }
 
       // ── Mode B: CSV / TSV with a header row ───────────────────────────────
@@ -445,14 +458,18 @@ ORDER BY row_num;</script>
         const headers = firstCells.map(h => h.toLowerCase());
         const rows    = lines.slice(1).map(l => parseCSVLine(l, delimiter));
 
-        const tIdx = findCol(headers, ['title', 'book_title', 'book title', 'name', 'search_title']);
-        const aIdx = findCol(headers, ['author', 'author_name', 'writer', 'by', 'search_author']);
+        const tIdx  = findCol(headers, ['title', 'book_title', 'book title', 'name', 'search_title']);
+        const aIdx  = findCol(headers, ['author', 'author_name', 'writer', 'by', 'search_author']);
+        const rnIdx = findCol(headers, ['row_num', 'row_number', 'rownum']);
+        const elIdx = findCol(headers, ['everand_link', 'everand link', 'everandlink']);
 
         if (tIdx !== -1 && aIdx !== -1) {
           // Found both — go straight to SQL
           infoEl.textContent = 'Auto-detected columns: "' + firstCells[tIdx] + '" (title) and "' + firstCells[aIdx] + '" (author).';
           document.getElementById('colPicker').style.display = 'none';
-          return formatFromParsed(rows, tIdx, aIdx, infoEl, errorEl);
+          parsedHeaders = firstCells;
+          parsedRows    = rows;
+          return formatFromParsed(rows, tIdx, aIdx, infoEl, errorEl, rnIdx, elIdx);
         } else {
           // Show column picker
           showColPicker(firstCells, rows, delimiter, tIdx, aIdx);
@@ -481,7 +498,7 @@ ORDER BY row_num;</script>
       document.getElementById('output').value = buildSQL(structs);
     });
 
-    function formatFromParsed(rows, tIdx, aIdx, infoEl, errorEl) {
+    function formatFromParsed(rows, tIdx, aIdx, infoEl, errorEl, rnIdx = -1, elIdx = -1) {
       const pairs    = [];
       const badLines = [];
       rows.forEach((cells, i) => {
@@ -489,7 +506,9 @@ ORDER BY row_num;</script>
         const author = (cells[aIdx] || '').trim();
         if (!title && !author) return; // skip blank rows
         if (!title || !author) { badLines.push(i + 2); return; } // +2: 1-based + header
-        pairs.push([title, author]);
+        const rowNum      = rnIdx !== -1 ? parseInt(cells[rnIdx], 10) : undefined;
+        const everandLink = elIdx !== -1 ? (cells[elIdx] || '').trim() : undefined;
+        pairs.push([title, author, rowNum, everandLink]);
       });
       if (badLines.length) {
         errorEl.textContent = (errorEl.textContent ? errorEl.textContent + '  ' : '') +
