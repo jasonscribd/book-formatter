@@ -466,7 +466,7 @@ ORDER BY row_num;</script>
         const aIdx   = parseInt(document.getElementById('authorColSelect').value, 10);
         const lh     = parsedHeaders.map(h => h.toLowerCase());
         const rnIdx  = findCol(lh, ['row_num', 'row_number', 'rownum']);
-        const elIdx  = findCol(lh, ['everand_link', 'everand link', 'everandlink']);
+        const elIdx  = findCol(lh, ['everand_link', 'everand link', 'everandlink', 'url', 'link', 'everand', 'href']);
         const docIdx = findCol(lh, ['doc_id', 'docid', 'doc id', 'document_id']);
         return formatFromParsed(parsedRows, tIdx, aIdx, infoEl, errorEl, rnIdx, elIdx, docIdx);
       }
@@ -479,7 +479,7 @@ ORDER BY row_num;</script>
         const tIdx   = findCol(headers, ['title', 'book_title', 'book title', 'name', 'search_title']);
         const aIdx   = findCol(headers, ['author', 'author_name', 'writer', 'by', 'search_author']);
         const rnIdx  = findCol(headers, ['row_num', 'row_number', 'rownum']);
-        const elIdx  = findCol(headers, ['everand_link', 'everand link', 'everandlink']);
+        const elIdx  = findCol(headers, ['everand_link', 'everand link', 'everandlink', 'url', 'link', 'everand', 'href']);
         const docIdx = findCol(headers, ['doc_id', 'docid', 'doc id', 'document_id']);
 
         if (tIdx !== -1 && aIdx !== -1) {
