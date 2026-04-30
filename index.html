@@ -226,7 +226,8 @@
     ROW_NUMBER() OVER (PARTITION BY i.row_num ORDER BY b.id) AS rn
   FROM input_books i
   LEFT JOIN `fable-backend.fable_prod_public.api_book` b
-    ON LOWER(b.title) = LOWER(i.title)
+    ON REGEXP_REPLACE(LOWER(b.title), r'\s*:\s*(?:a\s+)?(?:novel|novella|memoir|stor(?:y|ies)|poems?|thriller|mystery)\s*$', '')
+     = REGEXP_REPLACE(LOWER(i.title), r'\s*:\s*(?:a\s+)?(?:novel|novella|memoir|stor(?:y|ies)|poems?|thriller|mystery)\s*$', '')
     AND (
       i.author = ''
       OR b.authors IS NULL
