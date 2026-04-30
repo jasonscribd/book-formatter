@@ -209,22 +209,27 @@
     b.isbn,
     b.published_date,
     b.description,
-    REGEXP_REPLACE(
-      REPLACE(REPLACE(TO_JSON_STRING(b.authors), '["', ''), '"]', ''),
-      '","', ', '
-    ) AS author_display,
-    TRIM(SPLIT(
+    IF(b.authors IS NULL, NULL,
       REGEXP_REPLACE(
         REPLACE(REPLACE(TO_JSON_STRING(b.authors), '["', ''), '"]', ''),
         '","', ', '
-      ), ','
-    )[SAFE_OFFSET(0)]) AS first_author,
+      )
+    ) AS author_display,
+    IF(b.authors IS NULL, NULL,
+      TRIM(SPLIT(
+        REGEXP_REPLACE(
+          REPLACE(REPLACE(TO_JSON_STRING(b.authors), '["', ''), '"]', ''),
+          '","', ', '
+        ), ','
+      )[SAFE_OFFSET(0)])
+    ) AS first_author,
     ROW_NUMBER() OVER (PARTITION BY i.row_num ORDER BY b.id) AS rn
   FROM input_books i
   LEFT JOIN `fable-backend.fable_prod_public.api_book` b
     ON LOWER(b.title) = LOWER(i.title)
     AND (
       i.author = ''
+      OR b.authors IS NULL
       OR LOWER(TO_JSON_STRING(b.authors)) LIKE CONCAT('%', LOWER(i.author), '%')
     )
     AND b.type = 'book'
