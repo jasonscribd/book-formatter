@@ -197,7 +197,17 @@
   </div>
 
   <!-- SQL template stored as raw text — no JS escaping needed -->
-  <script id="sql-template" type="text/plain">books AS (
+  <script id="sql-template" type="text/plain">-- Pre-normalize input titles so the regex only runs once per input row, not per api_book row
+input_normalized AS (
+  SELECT
+    *,
+    REGEXP_REPLACE(
+      REGEXP_REPLACE(LOWER(title), r',?\s*#\d+.*$', ''),
+      r'\s*:.*$', ''
+    ) AS title_norm
+  FROM input_books
+),
+books AS (
   SELECT
     i.row_num,
     i.title AS search_title,
@@ -223,11 +233,19 @@
         ), ','
       )[SAFE_OFFSET(0)])
     ) AS first_author,
-    ROW_NUMBER() OVER (PARTITION BY i.row_num ORDER BY b.id) AS rn
-  FROM input_books i
+    -- Prefer editions that have a description, then lowest id as tiebreaker
+    ROW_NUMBER() OVER (
+      PARTITION BY i.row_num
+      ORDER BY
+        CASE WHEN b.description IS NOT NULL AND b.description != '' THEN 0 ELSE 1 END,
+        b.id
+    ) AS rn
+  FROM input_normalized i
   LEFT JOIN `fable-backend.fable_prod_public.api_book` b
-    ON REGEXP_REPLACE(LOWER(b.title), r'\s*:\s*(?:a\s+)?(?:novel|novella|memoir|stor(?:y|ies)|poems?|thriller|mystery)\s*$', '')
-     = REGEXP_REPLACE(LOWER(i.title), r'\s*:\s*(?:a\s+)?(?:novel|novella|memoir|stor(?:y|ies)|poems?|thriller|mystery)\s*$', '')
+    ON REGEXP_REPLACE(
+         REGEXP_REPLACE(LOWER(b.title), r',?\s*#\d+.*$', ''),
+         r'\s*:.*$', ''
+       ) = i.title_norm
     AND (
       i.author = ''
       OR b.authors IS NULL
@@ -336,16 +354,19 @@ ORDER BY row_num;</script>
       return result;
     }
 
-    /** Return the index of the first header that contains any of the keywords */
+    /** Return the index of the best-matching header, respecting keyword priority order */
     function findCol(headers, keywords) {
-      // Exact match first
-      let idx = headers.findIndex(h =>
-        keywords.some(k => h.toLowerCase() === k));
-      if (idx !== -1) return idx;
-      // Partial match
-      idx = headers.findIndex(h =>
-        keywords.some(k => h.toLowerCase().includes(k)));
-      return idx;
+      // Try each keyword in priority order (exact match first across all keywords)
+      for (const k of keywords) {
+        const idx = headers.findIndex(h => h.toLowerCase() === k);
+        if (idx !== -1) return idx;
+      }
+      // Then partial match, also in keyword priority order
+      for (const k of keywords) {
+        const idx = headers.findIndex(h => h.toLowerCase().includes(k));
+        if (idx !== -1) return idx;
+      }
+      return -1;
     }
 
     /** True if the first row looks like a header (non-numeric values) */
