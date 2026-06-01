@@ -233,11 +233,41 @@ books AS (
         ), ','
       )[SAFE_OFFSET(0)])
     ) AS first_author,
-    -- Prefer editions that have a description, then lowest id as tiebreaker
+    -- English detection by VOCABULARY DENSITY (not script). Latin-alphabet languages
+    -- like German/French share a-z, so a character test passes them. Instead we strip
+    -- HTML, then measure the share of words that are common English function words.
+    -- Genuine English prose runs ~0.25-0.34; foreign text with stray English tokens
+    -- (e.g. "friends-to-lovers-romance" in a German blurb) stays near 0. We require a
+    -- ratio >= 0.12 AND at least 3 stopword hits to count a description as English.
+    b.description IS NOT NULL AND b.description != ''
+      AND ARRAY_LENGTH(REGEXP_EXTRACT_ALL(
+            CONCAT(' ', REGEXP_REPLACE(LOWER(REGEXP_REPLACE(b.description, r'<[^>]*>', ' ')), r'[^a-z]', ' '), ' '),
+            r' (the|and|of|to|a|is|in|that|with|for|was|as|it|this|on|by|from|but|her|his|she|he|are|at|an|be|or|i|you|we|they|not|have|had|all|one|out|so|what|when|who|which|their|them) '
+          )) >= 3
+      AND SAFE_DIVIDE(
+            ARRAY_LENGTH(REGEXP_EXTRACT_ALL(
+              CONCAT(' ', REGEXP_REPLACE(LOWER(REGEXP_REPLACE(b.description, r'<[^>]*>', ' ')), r'[^a-z]', ' '), ' '),
+              r' (the|and|of|to|a|is|in|that|with|for|was|as|it|this|on|by|from|but|her|his|she|he|are|at|an|be|or|i|you|we|they|not|have|had|all|one|out|so|what|when|who|which|their|them) ')),
+            ARRAY_LENGTH(SPLIT(TRIM(REGEXP_REPLACE(LOWER(REGEXP_REPLACE(b.description, r'<[^>]*>', ' ')), r'[^a-z]+', ' ')), ' '))
+          ) >= 0.12
+      AS is_english_desc,
+    -- Prefer editions with an English description, then lowest id as tiebreaker
     ROW_NUMBER() OVER (
       PARTITION BY i.row_num
       ORDER BY
-        CASE WHEN b.description IS NOT NULL AND b.description != '' THEN 0 ELSE 1 END,
+        CASE
+          WHEN b.description IS NOT NULL AND b.description != ''
+            AND ARRAY_LENGTH(REGEXP_EXTRACT_ALL(
+                  CONCAT(' ', REGEXP_REPLACE(LOWER(REGEXP_REPLACE(b.description, r'<[^>]*>', ' ')), r'[^a-z]', ' '), ' '),
+                  r' (the|and|of|to|a|is|in|that|with|for|was|as|it|this|on|by|from|but|her|his|she|he|are|at|an|be|or|i|you|we|they|not|have|had|all|one|out|so|what|when|who|which|their|them) ')) >= 3
+            AND SAFE_DIVIDE(
+                  ARRAY_LENGTH(REGEXP_EXTRACT_ALL(
+                    CONCAT(' ', REGEXP_REPLACE(LOWER(REGEXP_REPLACE(b.description, r'<[^>]*>', ' ')), r'[^a-z]', ' '), ' '),
+                    r' (the|and|of|to|a|is|in|that|with|for|was|as|it|this|on|by|from|but|her|his|she|he|are|at|an|be|or|i|you|we|they|not|have|had|all|one|out|so|what|when|who|which|their|them) ')),
+                  ARRAY_LENGTH(SPLIT(TRIM(REGEXP_REPLACE(LOWER(REGEXP_REPLACE(b.description, r'<[^>]*>', ' ')), r'[^a-z]+', ' ')), ' '))
+                ) >= 0.12
+          THEN 0 ELSE 1
+        END,
         b.id
     ) AS rn
   FROM input_normalized i
@@ -275,6 +305,19 @@ top_reviews AS (
     AND ubr.hidden = FALSE
     AND ubr.public = TRUE
     AND ubr.contains_spoilers = FALSE
+    -- English-only, by vocabulary density (same approach as descriptions above)
+    AND ARRAY_LENGTH(REGEXP_EXTRACT_ALL(
+          CONCAT(' ', REGEXP_REPLACE(LOWER(REGEXP_REPLACE(ubr.review, r'<[^>]*>', ' ')), r'[^a-z]', ' '), ' '),
+          r' (the|and|of|to|a|is|in|that|with|for|was|as|it|this|on|by|from|but|her|his|she|he|are|at|an|be|or|i|you|we|they|not|have|had|all|one|out|so|what|when|who|which|their|them) '
+        )) >= 3
+    AND SAFE_DIVIDE(
+          ARRAY_LENGTH(REGEXP_EXTRACT_ALL(
+            CONCAT(' ', REGEXP_REPLACE(LOWER(REGEXP_REPLACE(ubr.review, r'<[^>]*>', ' ')), r'[^a-z]', ' '), ' '),
+            r' (the|and|of|to|a|is|in|that|with|for|was|as|it|this|on|by|from|but|her|his|she|he|are|at|an|be|or|i|you|we|they|not|have|had|all|one|out|so|what|when|who|which|their|them) ')),
+          ARRAY_LENGTH(SPLIT(TRIM(REGEXP_REPLACE(LOWER(REGEXP_REPLACE(ubr.review, r'<[^>]*>', ' ')), r'[^a-z]+', ' ')), ' '))
+        ) >= 0.12
+    -- Require at least two sentences: >=2 sentence-ending punctuation marks (. ! ?)
+    AND ARRAY_LENGTH(REGEXP_EXTRACT_ALL(ubr.review, r'[.!?]')) >= 2
 ),
 results AS (
   SELECT
@@ -294,7 +337,8 @@ results AS (
         b.isbn
       )
     END AS URL,
-    b.description AS Description,
+    -- Leave blank if the matched edition's description isn't English
+    IF(b.is_english_desc, b.description, NULL) AS Description,
     r.display_name AS ReviewerName,
     r.review AS TopReview,
     r.rating AS ReviewRating,
@@ -305,7 +349,7 @@ results AS (
   WHERE b.rn = 1
   GROUP BY
     b.row_num, b.everand_link, b.doc_id, b.id, b.search_title, b.search_author, b.title, b.author_display,
-    b.isbn, b.first_author, b.description, r.display_name, r.review, r.rating
+    b.isbn, b.first_author, b.description, b.is_english_desc, r.display_name, r.review, r.rating
 )
 SELECT
   row_num,
